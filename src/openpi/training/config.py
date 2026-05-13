@@ -1068,7 +1068,7 @@ _CONFIGS = [
         ),
         optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
         ema_decay=0.999,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader("checkpoints/pi05_libero10_lora/libero10_lora/9999/params"),
         freeze_filter=pi0_config.Pi0Config(
             pi05=True,
             action_horizon=10,
@@ -1078,7 +1078,7 @@ _CONFIGS = [
         ).get_distill_freeze_filter(),
         num_train_steps=50_000,
         wandb_enabled=False,
-        teacher_checkpoint="gs://openpi-assets/checkpoints/pi05_base/params",
+        teacher_checkpoint="checkpoints/pi05_libero10_lora/libero10_lora/9999/params",
         fsdp_devices=2,
     ),
 ]

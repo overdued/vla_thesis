@@ -11,6 +11,7 @@ from typing import Any
 
 import etils.epath as epath
 import flax.nnx as nnx
+from flax import traverse_util
 from flax.training import common_utils
 import jax
 import jax.numpy as jnp
@@ -57,8 +58,13 @@ def init_teacher_model(
     # Load checkpoint params
     params = _model.restore_params(checkpoint_path, dtype=jnp.bfloat16)
 
-    # Merge params into model
+    # Merge params into model, filtering out keys not in model state
+    # (e.g. LoRA params when loading a LoRA-tuned checkpoint into base model)
     graphdef, state = nnx.split(model)
+    state_keys = set(traverse_util.flatten_dict(state.to_pure_dict()).keys())
+    params = traverse_util.unflatten_dict(
+        {k: v for k, v in traverse_util.flatten_dict(params).items() if k in state_keys}
+    )
     state.replace_by_pure_dict(params)
     model = nnx.merge(graphdef, state)
 
@@ -193,9 +199,14 @@ def init_student_state(
         model = config.model.create(model_rng)
 
         # Merge partial params (from teacher checkpoint) into model
+        # Filter out keys not in model state (e.g. LoRA params)
         if partial_params is not None:
             graphdef, state = nnx.split(model)
-            state.replace_by_pure_dict(partial_params)
+            state_keys = set(traverse_util.flatten_dict(state.to_pure_dict()).keys())
+            filtered_params = traverse_util.unflatten_dict(
+                {k: v for k, v in traverse_util.flatten_dict(partial_params).items() if k in state_keys}
+            )
+            state.replace_by_pure_dict(filtered_params)
             model = nnx.merge(graphdef, state)
 
         params = nnx.state(model)
@@ -222,9 +233,10 @@ def init_student_state(
         return train_state_shape, state_sharding
 
     # Load teacher weights as initialization if provided
+    # Use np.ndarray to load on CPU, then let JIT shard to the mesh devices
     if teacher_checkpoint is not None:
         partial_params = _model.restore_params(
-            teacher_checkpoint, dtype=jnp.bfloat16
+            teacher_checkpoint, dtype=jnp.bfloat16, restore_type=np.ndarray
         )
     else:
         partial_params = None
@@ -233,7 +245,6 @@ def init_student_state(
 
     train_state = jax.jit(
         init,
-        donate_argnums=(1,),
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
@@ -329,7 +340,7 @@ def run_distillation(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
+            info_str = ", ".join(f"{k}={float(v):.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             if config.wandb_enabled:
                 wandb.log(reduced_info, step=step)

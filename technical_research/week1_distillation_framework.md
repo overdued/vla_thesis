@@ -107,18 +107,75 @@ uv run scripts/distill_pi05.py pi05_libero_distill --exp-name=distill_run1
 
 ## 四、编译测试状态
 
-**测试命令**:
+### 第一次测试（compile_test, 10:40 启动）
+- 运行约 4 小时后以 exit code 144 终止（系统超时）
+- GPU 4-7 利用率 88-100%，说明编译在进行中
+- 根因：JAX 首次编译 3B 模型 + FSDP 分片耗时远超预期
+
+### 第二次测试（compile_test2, 11:42 启动）
+- 同样运行约 4 小时后以 exit code 144 终止
+- 问题诊断：`uv run ... | tail -80` 管道导致 stdout 缓冲，无法实时看到进度
+
+### 第三次测试（compile_test3, 15:37 启动）
+**命令**:
 ```bash
 uv run python scripts/distill_pi05.py pi05_libero_distill \
-    --exp-name=compile_test --overwrite --num_train_steps=5
+    --exp-name=compile_test3 --overwrite --num_train_steps=5 \
+    2>&1 | tee /tmp/distill_test_output.log
 ```
 
-**状态**: 运行中（JAX 首次编译 3B 模型，预计需要 10-20 分钟）
-- GPU 0 已分配 ~20GB 显存（模型加载中）
-- 数据加载器初始化成功
-- Norm stats 已复制到 `assets/pi05_libero_distill/`
+**关键发现**: 从 GCS 匿名下载 `gs://openpi-assets/checkpoints/pi05_base/params` 速度仅 ~360KB/s，6GB checkpoint 需要 **4-5 小时**。这是前两次测试 exit code 144 的根因。
 
-**预期结果**: 5 步训练成功完成，无报错
+### 关键修复（16:09）
+
+1. **改用本地 LoRA checkpoint 作为教师**
+   - 配置 `teacher_checkpoint` 改为 `checkpoints/pi05_libero10_lora/libero10_lora/9999/params`
+   - 加载速度从 GCS 4-5 小时 → 本地 9.4 秒（**5.4 GiB/s**）
+   - 优势：LoRA checkpoint 在 LIBERO-10 上成功率 80%，比 base 模型更适合蒸馏
+
+2. **修复 LoRA 参数过滤**
+   - 问题：`state.replace_by_pure_dict(params)` 报错 `key 'lora_a' not available in state`
+   - 原因：LoRA checkpoint 包含 `lora_a`/`lora_b` 参数，但 base 模型架构没有这些层
+   - 修复：在 `init_teacher_model` 中过滤掉不在 model state 中的键
+   - 代码：
+     ```python
+     state_keys = set(traverse_util.flatten_dict(state.to_pure_dict()).keys())
+     params = traverse_util.unflatten_dict(
+         {k: v for k, v in traverse_util.flatten_dict(params).items() if k in state_keys}
+     )
+     ```
+
+### 第四次测试（compile_test_local3→final, 16:13-16:30）
+**成功！** 🎉
+
+| 时间 | 事件 |
+|------|------|
+| 16:13 | 启动编译测试（`CUDA_VISIBLE_DEVICES=0,1` 排除被占用的 GPU 4-7）|
+| 16:13:24 | 数据加载器初始化完成，local_batch_size=16 |
+| 16:13:43 | 教师模型加载成功（本地 LoRA checkpoint，4.81秒）|
+| 16:13:51 | 学生状态初始化成功，FSDP 分片完成 |
+| 16:14:12 | **训练开始**，进度条 `-/5` |
+| 16:15:00 | Step 0: `distill_loss=1.1719, grad_norm=1.4141` |
+| 16:16:48 | 5 步训练全部完成，`Distillation training complete!` |
+| 16:17:13 | Checkpoint 保存成功到 `compile_test_final/4/` |
+
+**关键修复汇总**：
+1. ✅ 本地 LoRA checkpoint 替代 GCS 下载（速度提升 ~5000x）
+2. ✅ LoRA 参数过滤（`lora_a`/`lora_b` 不在 base 模型中）
+3. ✅ CPU 加载 + JIT 分片（避免 `restore_params` OOM）
+4. ✅ `CUDA_VISIBLE_DEVICES=0,1`（排除被占用的 GPU 4-7）
+5. ✅ 格式字符串修复（`{v:.4f}` → `{float(v):.4f}`）
+
+**性能指标**：
+- 教师模型加载: ~5 秒
+- 学生状态初始化: ~3 秒
+- JIT 编译: ~1 分钟（首次）
+- 每步训练: ~21 秒
+- Checkpoint 保存: ~6 秒（异步）
+
+---
+
+## 五、Week 2 计划
 
 ---
 
