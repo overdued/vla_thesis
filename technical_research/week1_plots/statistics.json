@@ -1,0 +1,80 @@
+{
+  "project": "One-Step \u03c00.5 Distillation",
+  "date": "2026-05-13",
+  "week": 1,
+  "status": "framework_complete",
+  "model": {
+    "total_params_billion": 3.0,
+    "trainable_params_million": 50,
+    "trainable_ratio_percent": 0.5,
+    "frozen_params_billion": 2.95,
+    "model_dtype": "bfloat16",
+    "architecture": "PaliGemma + Action Expert"
+  },
+  "hardware": {
+    "gpus": "2x NVIDIA A800-SXM4-80GB",
+    "gpu_devices_used": [
+      0,
+      1
+    ],
+    "fsdp_devices": 2,
+    "memory_per_gpu_gb": 35,
+    "memory_total_gb": 80
+  },
+  "compilation_test": {
+    "steps": 5,
+    "teacher_load_time_sec": 4.81,
+    "teacher_load_speed_gibs": 5.3,
+    "student_init_time_sec": 3.0,
+    "jit_compile_time_sec": 60,
+    "per_step_time_sec": 21,
+    "checkpoint_save_time_sec": 6.5,
+    "total_time_sec": 168,
+    "step_0_distill_loss": 1.1719,
+    "step_0_grad_norm": 1.4141
+  },
+  "training_config": {
+    "batch_size": 16,
+    "learning_rate_peak": 0.0001,
+    "learning_rate_decay": 1e-05,
+    "warmup_steps": 1000,
+    "num_train_steps": 50000,
+    "ema_decay": 0.999,
+    "optimizer": "AdamW",
+    "clip_gradient_norm": 1.0,
+    "lr_schedule": "cosine_decay"
+  },
+  "issues_fixed": [
+    {
+      "issue": "GCS download too slow",
+      "severity": "High",
+      "time_to_fix_hours": 4.5,
+      "solution": "Use local LoRA checkpoint"
+    },
+    {
+      "issue": "LoRA parameter mismatch",
+      "severity": "High",
+      "time_to_fix_hours": 0.5,
+      "solution": "Filter checkpoint params with traverse_util"
+    },
+    {
+      "issue": "GPU OOM on JIT compile",
+      "severity": "High",
+      "time_to_fix_hours": 2.0,
+      "solution": "CPU load (np.ndarray) + CUDA_VISIBLE_DEVICES=0,1"
+    },
+    {
+      "issue": "Format string error",
+      "severity": "Low",
+      "time_to_fix_hours": 0.1,
+      "solution": "Explicit float() conversion"
+    }
+  ],
+  "expected_results": {
+    "teacher_inference_time_ms": 800,
+    "student_inference_time_ms": 80,
+    "expected_speedup": 10,
+    "teacher_success_rate_libero10": 0.8,
+    "target_student_success_rate": 0.75
+  }
+}
