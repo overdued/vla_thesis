@@ -115,3 +115,23 @@ class Pi0Config(_model.BaseModelConfig):
         if not filters:
             return nnx.Nothing
         return nnx.All(*filters)
+
+    def get_distill_freeze_filter(self) -> nnx.filterlib.Filter:
+        """Freeze all parameters except action projection layers for distillation.
+
+        During One-Step distillation, only the action projection layers
+        (action_in_proj, action_out_proj, time_mlp_in, time_mlp_out) are
+        trainable. All vision and language model parameters are frozen.
+        """
+        import openpi.shared.nnx_utils as nnx_utils
+
+        # Action projection layers that should remain trainable
+        action_proj_filter = nnx_utils.PathRegex(".*action_(in|out)_proj.*")
+        time_mlp_filter = nnx_utils.PathRegex(".*time_mlp.*")
+
+        # Freeze everything EXCEPT action projection layers
+        return nnx.All(
+            nnx.Param,
+            nnx.Not(action_proj_filter),
+            nnx.Not(time_mlp_filter),
+        )

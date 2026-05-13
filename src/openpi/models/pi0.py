@@ -277,3 +277,94 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
+
+    @at.typecheck
+    def compute_distillation_loss(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        teacher_actions: _model.Actions,
+    ) -> at.Float[at.Array, ""]:
+        """Distillation loss: single-step student prediction vs teacher 10-step target.
+
+        The student receives pure noise (t=1) and must predict the clean action directly.
+        The supervision signal is the teacher's 10-step ODE integration result.
+        """
+        preprocess_rng, noise_rng = jax.random.split(rng)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=False)
+
+        batch_size = observation.state.shape[0]
+        noise = jax.random.normal(noise_rng, teacher_actions.shape)
+        # t=1: pure noise end (opposite of pi0 paper convention)
+        time = jnp.ones((batch_size,))
+
+        # Prefix embedding (images + language) -- frozen during distillation
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+
+        # Suffix embedding (noise actions + timestep) -- action projection layers are trainable
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            observation, noise, time
+        )
+
+        # Build full attention mask
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+
+        # Joint forward through LLM (frozen during distillation)
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens],
+            mask=attn_mask,
+            positions=positions,
+            adarms_cond=[None, adarms_cond],
+        )
+
+        # Predict actions from suffix output (action_out_proj is trainable)
+        student_actions = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+        # MSE distillation loss
+        return jnp.mean(jnp.square(student_actions - teacher_actions))
+
+    @at.typecheck
+    def single_step_predict(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+    ) -> _model.Actions:
+        """Single-step inference: predict clean actions from pure noise in one forward pass.
+
+        This is the fast inference path for the distilled model. Instead of 10-step ODE
+        integration, it samples noise and directly predicts the action.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+
+        batch_size = observation.state.shape[0]
+        noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+        # t=1: pure noise end
+        time = jnp.ones((batch_size,))
+
+        # Prefix embedding
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+
+        # Suffix embedding with noise at t=1
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            observation, noise, time
+        )
+
+        # Full attention
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+
+        # Forward through LLM
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens],
+            mask=attn_mask,
+            positions=positions,
+            adarms_cond=[None, adarms_cond],
+        )
+
+        # Output projection
+        return self.action_out_proj(suffix_out[:, -self.action_horizon :])
